@@ -116,7 +116,13 @@ plugin.app.workspace.getLeaf=mode=>{check(mode==='tab','Cloud opens as workspace
 plugin.app.workspace.revealLeaf=async leaf=>{check(leaves.includes(leaf),'Reveals correct workspace leaf');revealed++;};
 await plugin.openCloud();const tab=leaves[0].view;check(tab instanceof ob.ItemView&&tab.getViewType()===CLOUD_VIEW&&tab.getDisplayText()==='云端素材','Cloud browser is registered workspace view');check(!tab.modalEl&&plugin.modals.size===modalCount,'Cloud browser does not create modal');tab.query='keep state';await plugin.openCloud();check(created===1&&revealed===2&&leaves[0].view.query==='keep state','Repeated clicks reuse existing tab and state');tab.onClose();check(!plugin.cloudViews.has(tab)&&tab.urls.size===0,'Tab close cleans view resources');
 const detached=[];plugin.app.workspace.detachLeavesOfType=type=>detached.push(type);plugin.onunload();check(detached.includes(VIEW)&&detached.includes(CLOUD_VIEW),'Unload detaches local and cloud tabs');
-document.getElementById('result').textContent='PASS: cloud insertion saves original locally and embeds normal link; offline reuse and local-first preview; concurrent download dedup; stale target and download failure protection; legacy references compatible; server thumbnail/progressive/priority/WebP/cache/tabs regression';
+const management=cloudView(plugin);management.open();management.connection={...dav,id:'drag-target'};management.stack=[{id:dav.endpoint,name:'test'}];
+let dropped;management.uploadFiles=async(files,target)=>{dropped={files,target};};
+const drop=new Event('drop',{bubbles:true,cancelable:true});Object.defineProperty(drop,'dataTransfer',{value:{files:[new File(['hello'],'drag.txt')]}});management.contentEl.dispatchEvent(drop);
+check(drop.defaultPrevented&&dropped.files[0].name==='drag.txt'&&dropped.target.folder===dav.endpoint&&dropped.target.connection.id==='drag-target','Dropping files captures cloud connection and folder');
+check([...management.contentEl.querySelectorAll('button')].some(b=>b.textContent==='新建文件夹'),'New folder entry visible');
+let confirmed=false;management.operationDialog('删除测试','confirm','',async()=>{confirmed=true;},true);const confirmation=lastModal;check(!confirmed,'Delete waits for confirmation');confirmation.contentEl.querySelector('button').click();await waitFor(()=>confirmed);management.close();
+document.getElementById('result').textContent='PASS: cloud drag/drop target and delete confirmation; local-first insertion/offline reuse; preview/cache/tabs/settings regression';
 }
 test().catch(e=>document.getElementById('result').textContent='FAIL: '+e.stack);
 `;

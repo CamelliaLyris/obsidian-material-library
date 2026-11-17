@@ -26,11 +26,11 @@ async function cloudRequest(url, options = {}) {
   try {
     response = await Promise.race([
       requestUrl({ url, method: 'GET', throw: false, ...options }).catch(() => { throw new Error('网络请求失败，请检查地址、证书与网络连接'); }),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('请求超过 30 秒，请检查网络或稍后重试')), 30000); })
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('请求超时，请刷新目录确认操作结果')), options.method && options.method !== 'GET' && options.method !== 'PROPFIND' ? 30 * 60 * 1000 : 30000); })
     ]);
   } finally { clearTimeout(timer); }
   if (response.status < 200 || response.status >= 300) {
-    const message = response.status === 401 ? '授权失效，请更新令牌或密码' : response.status === 403 ? '没有读取权限，请检查授权范围或 S3 策略' : response.status === 429 ? '请求过于频繁，请稍后重试' : '请检查服务地址、网络和权限';
+    const message = response.status === 401 ? '授权失效，请更新令牌或密码' : response.status === 403 ? '没有操作权限，请检查读写授权范围或 S3 策略' : response.status === 412 ? '目标文件已存在或不满足写入条件，未覆盖' : response.status === 405 ? '服务不允许此操作，请检查 WebDAV 写入配置' : response.status === 429 ? '请求过于频繁，请稍后重试' : '请检查服务地址、网络和权限';
     throw new Error(`HTTP ${response.status}：${message}`);
   }
   return response;
@@ -46,7 +46,7 @@ function safeDavURL(value, c) {
   if (url.origin !== root.origin || !url.pathname.startsWith(root.pathname) || url.username || url.password) throw new Error('服务返回了素材目录之外的地址');
   return url.href;
 }
-async function s3SignedURL(c, key = '', params = {}, date = new Date(), cryptoAPI = globalThis.crypto) {
+async function s3SignedURL(c, key = '', params = {}, date = new Date(), cryptoAPI = globalThis.crypto, method = 'GET', signedHeaders = {}) {
   if (!cryptoAPI?.subtle) throw new Error('当前环境不支持 S3 签名所需的 Web Crypto');
   const endpoint = httpURL(c.endpoint), url = new URL(endpoint.href);
   if (!c.bucket || !c.accessKey || !c.secretKey) throw new Error('请填写 Bucket、Access Key 和 Secret Key');
@@ -56,14 +56,16 @@ async function s3SignedURL(c, key = '', params = {}, date = new Date(), cryptoAP
   url.pathname = base + (c.pathStyle ? '/' + encodeRFC(c.bucket) : '') + '/' + key.split('/').map(encodeRFC).join('/');
   const time = date.toISOString().replace(/[:-]|\.\d{3}/g, ''), day = time.slice(0, 8);
   const scope = `${day}/${c.region || 'us-east-1'}/s3/aws4_request`;
-  const query = { ...params, 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': `${c.accessKey}/${scope}`, 'X-Amz-Date': time, 'X-Amz-Expires': '300', 'X-Amz-SignedHeaders': 'host' };
+  const canonicalHeaders = { host: url.host, ...signedHeaders };
+  const headerNames = Object.keys(canonicalHeaders).sort();
+  const query = { ...params, 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': `${c.accessKey}/${scope}`, 'X-Amz-Date': time, 'X-Amz-Expires': method === 'GET' ? '300' : '3600', 'X-Amz-SignedHeaders': headerNames.join(';') };
   if (c.sessionToken) query['X-Amz-Security-Token'] = c.sessionToken;
   const canonicalQuery = Object.entries(query).map(([k,v]) => [encodeRFC(k), encodeRFC(String(v))]).sort((a,b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : 1).map(pair => pair.join('=')).join('&');
   const encoder = new TextEncoder();
   const hex = bytes => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
   const hash = async value => hex(await cryptoAPI.subtle.digest('SHA-256', encoder.encode(value)));
   const hmac = async (keyBytes, value) => cryptoAPI.subtle.sign('HMAC', await cryptoAPI.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), encoder.encode(value));
-  const canonical = `GET\n${url.pathname}\n${canonicalQuery}\nhost:${url.host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const canonical = `${method}\n${url.pathname}\n${canonicalQuery}\n${headerNames.map(k => k + ':' + String(canonicalHeaders[k]).trim().replace(/\s+/g, ' ') + '\n').join('')}\n${headerNames.join(';')}\nUNSIGNED-PAYLOAD`;
   let signingKey = encoder.encode('AWS4' + c.secretKey);
   for (const part of [day, c.region || 'us-east-1', 's3', 'aws4_request']) signingKey = await hmac(signingKey, part);
   const signature = hex(await hmac(signingKey, `AWS4-HMAC-SHA256\n${time}\n${scope}\n${await hash(canonical)}`));
@@ -86,7 +88,7 @@ async function listCloud(c, folder, page, win) {
       const props = xmlNodes(node, 'propstat').find(p => /\s200\s/.test(xmlText(p, 'status'))); if (!props) continue;
       const isFolder = xmlNodes(props, 'collection').length > 0;
       let name = xmlText(props, 'displayname'); if (!name) { try { name = decodeURIComponent(new URL(id).pathname.replace(/\/$/, '').split('/').pop()); } catch (_) { name = id; } }
-      if (isFolder || cloudImage(name)) items.push({ id, name, folder: isFolder, size: Number(xmlText(props, 'getcontentlength')) || 0, version: xmlText(props, 'getetag') || xmlText(props, 'getlastmodified') });
+      items.push({ id, name, folder: isFolder, size: Number(xmlText(props, 'getcontentlength')) || 0, version: xmlText(props, 'getetag') || xmlText(props, 'getlastmodified') });
     }
     return { items, next: null };
   }
@@ -95,10 +97,86 @@ async function listCloud(c, folder, page, win) {
     const response = await cloudRequest(await s3SignedURL(c, '', params));
     const xml = cloudXML(response.text, win), items = [];
     for (const node of xmlNodes(xml, 'CommonPrefixes')) { const id = xmlText(node, 'Prefix'); items.push({ id, name: id.replace(/\/$/, '').split('/').pop(), folder: true }); }
-    for (const node of xmlNodes(xml, 'Contents')) { const id = xmlText(node, 'Key'); if (cloudImage(id)) items.push({ id, name: id.split('/').pop(), folder: false, size: Number(xmlText(node, 'Size')) || 0, version: xmlText(node, 'ETag') || xmlText(node, 'LastModified') }); }
+    for (const node of xmlNodes(xml, 'Contents')) { const id = xmlText(node, 'Key'); if (id && !id.endsWith('/')) items.push({ id, name: id.split('/').pop(), folder: false, size: Number(xmlText(node, 'Size')) || 0, version: xmlText(node, 'ETag') || xmlText(node, 'LastModified') }); }
     return { items, next: xmlText(xml, 'NextContinuationToken') || null };
   }
   throw new Error('不支持的连接类型，请使用 WebDAV 或 S3');
+}
+function cloudName(value) {
+  const name = String(value || '').trim();
+  if (!name || name === '.' || name === '..' || /[\\/\x00-\x1f]/.test(name)) throw new Error('名称不能为空或包含斜杠、控制字符');
+  return name;
+}
+function cloudChild(c, folder, name, directory = false) {
+  name = cloudName(name);
+  if (c.provider === 'webdav') {
+    const base = new URL(safeDavURL(folder, c)); if (!base.pathname.endsWith('/')) base.pathname += '/';
+    return safeDavURL(new URL(encodeRFC(name) + (directory ? '/' : ''), base).href, c);
+  }
+  if (c.provider !== 's3' || (c.prefix && !folder.startsWith(c.prefix)) || (folder && !folder.endsWith('/')) || folder.split('/').some(p => p === '.' || p === '..')) throw new Error('目标目录超出配置范围');
+  return folder + name + (directory ? '/' : '');
+}
+function assertCloudItem(c, id) {
+  if (c.provider === 'webdav') {
+    const url = safeDavURL(id, c);
+    if (new URL(url).pathname.replace(/\/$/, '') === new URL(cloudRoot(c)).pathname.replace(/\/$/, '')) throw new Error('不能修改连接根目录');
+    return url;
+  }
+  if (!id || id === (c.prefix || '') || (c.prefix && !id.startsWith(c.prefix)) || id.split('/').some(p => p === '.' || p === '..')) throw new Error('不能修改根目录或范围外的对象');
+  return id;
+}
+async function cloudWrite(c, id, method, win, headers = {}, body) {
+  assertCloudItem(c, id);
+  const url = c.provider === 'webdav' ? safeDavURL(id, c) : await s3SignedURL(c, id, {}, new Date(), win.crypto, method, Object.fromEntries(Object.entries(headers).filter(([k]) => k.startsWith('x-amz-'))));
+  const response = await cloudRequest(url, { method, headers: { ...(c.provider === 'webdav' ? davAuth(c, win) : {}), ...headers }, ...(body === undefined ? {} : { body }) });
+  if (response.status === 207 || /<(?:\w+:)?Error[\s>]/.test(response.text || '')) throw new Error('服务报告部分失败，请刷新目录确认结果');
+  return response;
+}
+async function cloudCreateFolder(c, folder, name, win) {
+  const id = cloudChild(c, folder, name, true);
+  await cloudWrite(c, id, c.provider === 'webdav' ? 'MKCOL' : 'PUT', win, { 'If-None-Match': '*' }, c.provider === 's3' ? new ArrayBuffer(0) : undefined);
+}
+async function cloudMove(c, item, destination, win, copy = false) {
+  const source = assertCloudItem(c, item.id); assertCloudItem(c, destination);
+  if (source === destination || (item.folder && destination.startsWith(source))) throw new Error('目标与来源相同或位于来源目录内');
+  if (c.provider === 'webdav') {
+    await cloudWrite(c, source, copy ? 'COPY' : 'MOVE', win, { Destination: destination, Overwrite: 'F', ...(copy ? { Depth: 'infinity' } : {}) }); return;
+  }
+  if (item.folder) throw new Error('S3 文件夹为对象前缀；当前支持文件移动、复制和重命名，文件夹请用服务端客户端操作');
+  const headers = { 'x-amz-copy-source': '/' + encodeRFC(c.bucket) + '/' + source.split('/').map(encodeRFC).join('/'), 'If-None-Match': '*' };
+  if (item.version?.startsWith('"')) headers['x-amz-copy-source-if-match'] = item.version;
+  await cloudWrite(c, destination, 'PUT', win, headers);
+  if (!copy) {
+    try { await cloudWrite(c, source, 'DELETE', win, item.version?.startsWith('"') ? { 'If-Match': item.version } : {}); }
+    catch (err) { throw new Error('目标副本已创建，但原文件删除失败；两份均可能保留：' + err.message); }
+  }
+}
+async function cloudDelete(c, item, win) {
+  assertCloudItem(c, item.id);
+  if (c.provider === 's3' && item.folder) {
+    const contents = await listCloud(c, item.id, null, win);
+    if (contents.items.length || contents.next) throw new Error('S3 仅支持删除空文件夹；请先处理其中的文件');
+  }
+  await cloudWrite(c, item.id, 'DELETE', win, item.version?.startsWith('"') ? { 'If-Match': item.version } : {});
+}
+async function uploadCloudFile(c, folder, file, win) {
+  if (!file) throw new Error('未选择文件');
+  const name = String(file.name || '素材').replace(/[\\/:*?"<>|\x00-\x1f]/g, '-').replace(/^\.+/, '').replace(/[. ]+$/, '').trim().slice(0, 180) || '素材';
+  const dot = name.lastIndexOf('.');
+  const unique = (dot > 0 ? name.slice(0, dot) : name) + '-' + stamp() + (dot > 0 ? name.slice(dot) : '');
+  let url, headers = { 'If-None-Match': '*', 'Content-Type': file.type || 'application/octet-stream' };
+  if (c.provider === 'webdav') {
+    const base = new URL(safeDavURL(folder, c)); if (!base.pathname.endsWith('/')) base.pathname += '/';
+    url = safeDavURL(new URL(encodeRFC(unique), base).href, c); headers = { ...headers, ...davAuth(c, win) };
+  } else if (c.provider === 's3') {
+    if ((c.prefix && !folder.startsWith(c.prefix)) || (folder && !folder.endsWith('/')) || folder.split('/').some(p => p === '.' || p === '..')) throw new Error('上传目录超出配置范围');
+    url = await s3SignedURL(c, folder + unique, {}, new Date(), win.crypto, 'PUT');
+  } else throw new Error('不支持此连接上传');
+  const body = await file.arrayBuffer();
+  // No automatic retries: after a timeout the server may already have saved the object.
+  try { await cloudRequest(url, { method: 'PUT', headers, body }); }
+  catch (err) { throw new Error(err.message + '；上传结果不确定时请先刷新云端目录再重试'); }
+  return unique;
 }
 async function cloudImageRequest(c, item, win, thumbnail) {
   let url, headers = {};
@@ -313,6 +391,16 @@ class CloudBrowser extends ItemView {
     const tools = this.contentEl.createDiv({ cls: 'ml-tools' });
     this.select = tools.createEl('select', { attr: { 'aria-label': '网盘连接' } });
     const add = tools.createEl('button', { text: '管理连接' }); add.onclick = () => thisCloudSettings(this.plugin);
+    this.uploadInput = tools.createEl('input', { type: 'file', attr: { multiple: '', 'aria-label': '选择上传到云盘的文件' } }); this.uploadInput.style.display = 'none';
+    this.uploadButton = tools.createEl('button', { text: '上传到当前云盘', cls: 'mod-cta' });
+    this.uploadButton.onclick = () => { if (!this.connection || !this.stack.length) { new Notice('请先选择云盘连接和目标目录'); return; } if (this.uploading) return; this.uploadTarget = { connection: { ...this.connection }, folder: this.stack.at(-1).id }; this.uploadInput.click(); };
+    this.uploadInput.onchange = async () => { const files = Array.from(this.uploadInput.files || []); this.uploadInput.value = ''; if (!files.length || this.uploading) return; await this.uploadFiles(files, this.uploadTarget); };
+    const mkdir = tools.createEl('button', { text: '新建文件夹' }); mkdir.onclick = () => {
+      if (!this.connection || !this.stack.length) { new Notice('请先选择连接'); return; }
+      const c = { ...this.connection }, folder = this.stack.at(-1).id;
+      this.operationDialog('新建云端文件夹', '文件夹名称', '', value => cloudCreateFolder(c, folder, value, this.contentEl.ownerDocument.defaultView));
+    };
+    const reload = tools.createEl('button', { text: '刷新当前目录' }); reload.onclick = () => this.load(false);
     const refresh = tools.createEl('button', { text: '刷新连接列表' }); refresh.onclick = () => this.refreshConnections();
     const clearCache = tools.createEl('button', { text: '清除预览缓存' }); clearCache.onclick = () => { cloudCache(this.plugin).clear(); this.draw(); new Notice('预览缓存已清除'); };
     const up = tools.createEl('button', { text: '返回上层' }); up.onclick = () => { if (this.busy || this.stack.length <= 1) return; this.stack.pop(); this.load(false); };
@@ -323,10 +411,52 @@ class CloudBrowser extends ItemView {
     checkbox.onchange = () => { this.auto = checkbox.checked; this.draw(); };
     this.status = this.contentEl.createDiv({ cls: 'ml-status' });
     this.grid = this.contentEl.createDiv({ cls: 'ml-grid' });
+    this.contentEl.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; } });
+    this.contentEl.addEventListener('drop', e => {
+      if (!e.dataTransfer?.files.length) return;
+      e.preventDefault(); e.stopPropagation();
+      if (!this.connection || !this.stack.length) { new Notice('请先选择上传目标云盘和目录'); return; }
+      if (this.uploading) { new Notice('正在上传，请稍候'); return; }
+      this.uploadFiles(Array.from(e.dataTransfer.files), { connection: { ...this.connection }, folder: this.stack.at(-1).id });
+    });
     this.more = this.contentEl.createEl('button', { text: '加载下一页' }); this.more.onclick = () => this.load(true); this.more.style.display = 'none';
     this.select.onchange = () => { this.reset(); const stored = this.plugin.options.connections.find(c => c.id === this.select.value); if (!stored || !CLOUD_PROVIDERS[stored.provider]) return; this.connection = { ...stored, ...this.plugin.cloudSecrets.get(stored.id) }; try { validateCloudConnection(this.connection); this.stack = [{ id: cloudRoot(this.connection), name: this.connection.name }]; this.load(false); } catch (err) { this.status.setText(err.message + '，请编辑连接补充授权'); } };
     this.status.setText('选择连接后自动预览可见图片，不会写入笔记库。');
     this.refreshConnections();
+  }
+  operationDialog(title, label, initial, action, destructive = false) {
+    const modal = new Modal(this.app); this.plugin.modals.add(modal);
+    modal.onOpen = () => {
+      modal.contentEl.createEl('h2', { text: title });
+      modal.contentEl.createEl('p', { text: label });
+      const input = destructive ? null : modal.contentEl.createEl('input', { type: 'text', value: initial, attr: { 'aria-label': label } });
+      const status = modal.contentEl.createEl('p', { attr: { 'aria-live': 'polite' } });
+      const button = modal.contentEl.createEl('button', { text: destructive ? '确认永久删除' : '确定', cls: destructive ? 'mod-warning' : 'mod-cta' });
+      button.onclick = async () => {
+        if (button.disabled) return; button.disabled = true; status.setText('正在处理…');
+        try { await action(input?.value); cloudCache(this.plugin).clear(); new Notice('操作完成'); modal.close(); if (!this.closed && !this.busy) await this.load(false); }
+        catch (err) { status.setText(err.message); }
+        finally { button.disabled = false; }
+      };
+      input?.focus();
+    };
+    modal.onClose = () => this.plugin.modals.delete(modal); modal.open();
+  }
+  itemActions(item, connection) {
+    const win = this.contentEl.ownerDocument.defaultView;
+    const menu = new Menu();
+    const folder = this.stack.at(-1).id;
+    const supported = connection.provider === 'webdav' || !item.folder;
+    if (supported) {
+      menu.addItem(i => i.setTitle('重命名').setIcon('pencil').onClick(() => this.operationDialog('重命名 ' + item.name, '新名称（保留文件扩展名）', item.name, value => cloudMove(connection, item, cloudChild(connection, folder, value, item.folder), win))));
+      for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => this.operationDialog(copy ? '复制文件' : '移动文件', '目标文件夹（相对于此连接根目录，不含文件名；留空为根目录）', '', value => {
+        const parts = value.trim().split('/').filter(Boolean); let target = cloudRoot(connection);
+        for (const part of parts) target = cloudChild(connection, target, part, true);
+        return cloudMove(connection, item, cloudChild(connection, target, item.name, item.folder), win, copy);
+      })));
+    }
+    menu.addItem(i => i.setTitle('删除').setIcon('trash').onClick(() => this.operationDialog('删除 ' + item.name, item.folder ? '永久删除此文件夹。WebDAV 会同时删除所有子文件；S3 仅允许空文件夹。此操作不能从插件撤销。' : '永久删除此云端文件。此操作不能从插件撤销。', '', () => cloudDelete(connection, item, win), true)));
+    return menu;
   }
   refreshConnections() {
     if (this.closed || !this.select) return;
@@ -346,6 +476,20 @@ class CloudBrowser extends ItemView {
     } else if (this.connection) { this.reset(); this.status.setText('当前连接已移除，请选择其他连接'); }
   }
   clearURLs() { this.observer?.disconnect(); this.queue = []; for (const url of this.urls) this.contentEl.ownerDocument.defaultView.URL.revokeObjectURL(url); this.urls.clear(); this.previewBytes = 0; }
+  async uploadFiles(files, target) {
+    if (!target || this.uploading) return;
+    this.uploading = true; this.uploadButton.disabled = true;
+    const results = [], failures = [];
+    try {
+      for (let i = 0; i < files.length; i++) {
+        this.uploadButton.setText(`上传中 ${i + 1}/${files.length}`);
+        try { results.push(await uploadCloudFile(target.connection, target.folder, files[i], this.contentEl.ownerDocument.defaultView)); }
+        catch (err) { failures.push(`${files[i].name}：${err.message}`); }
+      }
+      new Notice(`云盘上传成功 ${results.length} 个，失败 ${failures.length} 个` + (failures.length ? '\n' + failures.join('\n') : ''), failures.length ? 15000 : 6000);
+      if (!this.closed && this.connection?.id === target.connection.id && this.stack.at(-1)?.id === target.folder) { this.query = ''; this.search.value = ''; if (!this.busy) await this.load(false); }
+    } finally { this.uploading = false; this.uploadButton.disabled = false; this.uploadButton.setText('上传到当前云盘'); }
+  }
   reset() { this.requestSerial++; this.generation++; this.busy = false; this.clearURLs(); this.items = []; this.stack = []; this.page = null; this.connection = null; this.grid.empty(); this.more.style.display = 'none'; }
   async load(append) {
     if (this.busy || !this.connection || !this.stack.length) return;
@@ -384,8 +528,10 @@ class CloudBrowser extends ItemView {
     // Limit each rendered page to 100 tiles to bound preview memory; all listed items remain searchable.
     for (const item of items.slice(0, 100)) {
       const tile = this.grid.createEl('div', { cls: 'ml-cloud-tile' });
+      tile.oncontextmenu = e => { e.preventDefault(); this.itemActions(item, connection).showAtMouseEvent(e); };
       const thumb = tile.createEl('button', { cls: 'ml-cloud-thumb', attr: { 'aria-label': item.name } });
       if (item.folder) { setIcon(thumb, 'folder'); thumb.onclick = () => { if (!this.busy) { this.stack.push({ id: item.id, name: item.name }); this.load(false); } }; }
+      else if (!cloudImage(item.name)) { setIcon(thumb, 'file'); thumb.disabled = true; thumb.title = '此类型仅列出名称，不提供云端预览'; }
       else {
         thumb.setText(this.auto ? '等待加载…' : '点击预览'); thumb.onclick = () => paint(item, thumb);
         const full = tile.createEl('button', { text: '查看大图', cls: 'ml-cloud-full' }); full.onclick = () => this.fullPreview(item);
@@ -394,6 +540,7 @@ class CloudBrowser extends ItemView {
         else if (this.auto) { thumb._cloudLoad = () => paint(item, thumb); if (this.observer) this.observer.observe(thumb); else paint(item, thumb); }
       }
       tile.createDiv({ cls: 'ml-name', text: item.name });
+      const actions = tile.createEl('button', { text: '管理', cls: 'ml-cloud-full', attr: { 'aria-label': '管理 ' + item.name } }); actions.onclick = e => this.itemActions(item, connection).showAtMouseEvent(e);
     }
     if (items.length > 100) this.grid.createEl('p', { text: '为控制预览内存，仅展示前 100 项；请搜索名称缩小范围。' });
   }

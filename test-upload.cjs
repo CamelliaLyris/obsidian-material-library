@@ -1,0 +1,34 @@
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const notices = [];
+const base = class {};
+const ob = { Plugin: base, ItemView: base, MarkdownView: base, MarkdownRenderChild: base, PluginSettingTab: base, Modal: base, Notice: class { constructor(s) { notices.push(s); } }, normalizePath: s => s };
+const context = { module: { exports: {} }, require: () => ob, console, setTimeout, clearTimeout };
+vm.runInNewContext(fs.readFileSync(__dirname + '/main.js', 'utf8'), context);
+async function run() {
+  const plugin = new context.module.exports();
+  plugin.options = { root: '素材库' };
+  const saved = new Map([['素材库/分类/封面.JPG', { bytes: 'old' }]]);
+  plugin.ensureFolder = async () => {};
+  plugin.app = { vault: { getAbstractFileByPath: p => saved.get(p), adapter: { exists: async p => saved.has(p) }, createBinary: async (p, b) => { assert(!saved.has(p)); const f = { path: p, bytes: b }; saved.set(p, f); return f; } } };
+  const bytes = Uint8Array.from([0, 1, 255]).buffer;
+  const file = name => ({ name, arrayBuffer: async () => bytes });
+  const progress = [];
+  const result = await plugin.importFiles([file('封面.JPG'), file('archive.zip'), file('LICENSE'), { name: '坏图.png', arrayBuffer: async () => { throw Error('读取失败'); } }, file('最后.webp')], '素材库/分类', (n, total) => progress.push([n, total]));
+  assert.equal(result.length, 4);
+  assert.match(result[0].path, /封面-.+\.JPG$/);
+  assert.equal(saved.get('素材库/分类/封面.JPG').bytes, 'old');
+  assert(saved.has('素材库/分类/archive.zip'));
+  assert(saved.has('素材库/分类/LICENSE'));
+  assert(result.every(f => f.bytes === bytes));
+  assert.deepEqual(progress.at(-1), [5, 5]);
+  assert(notices.some(n => n.includes('坏图.png') && n.includes('读取失败')));
+  assert.equal(plugin.importing, false);
+  await assert.rejects(plugin.importFiles([file('a.png')], '其他目录'));
+  await assert.rejects(plugin.importFiles([file('a.png')], '素材库/../越界'));
+  plugin.importing = true;
+  await assert.rejects(plugin.importFiles([file('a.png')], '素材库'));
+  console.log('PASS upload: bytes, names, collisions, arbitrary files, partial failure, progress, folder boundaries, concurrent guard');
+}
+run().catch(e => { console.error(e); process.exitCode = 1; });
