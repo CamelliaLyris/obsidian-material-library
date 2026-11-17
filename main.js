@@ -5,7 +5,7 @@ const TYPES = {
   image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'],
   video: ['mp4', 'webm', 'mov', 'mkv'], audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac'], document: ['pdf']
 };
-const DEFAULTS = { root: '素材库', sources: ['从夯到拉/素材库'], size: 160, sort: 'newest', showNames: true, previewConcurrency: 4, convertPreviews: true, previewEdge: 480, previewQuality: 78, connections: [] };
+const DEFAULTS = { root: '素材库', sources: [], size: 160, sort: 'newest', showNames: true, previewConcurrency: 4, convertPreviews: true, previewEdge: 480, previewQuality: 78, connections: [] };
 const kind = file => Object.keys(TYPES).find(k => TYPES[k].includes(file.extension?.toLowerCase())) || 'file';
 const within = (p, folder) => p === folder || p.startsWith(folder + '/');
 function folderPath(value) {
