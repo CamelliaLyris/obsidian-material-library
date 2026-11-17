@@ -449,11 +449,12 @@ class CloudBrowser extends ItemView {
     const supported = connection.provider === 'webdav' || !item.folder;
     if (supported) {
       menu.addItem(i => i.setTitle('重命名').setIcon('pencil').onClick(() => this.operationDialog('重命名 ' + item.name, '新名称（保留文件扩展名）', item.name, value => cloudMove(connection, item, cloudChild(connection, folder, value, item.folder), win))));
-      for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => this.operationDialog(copy ? '复制文件' : '移动文件', '目标文件夹（相对于此连接根目录，不含文件名；留空为根目录）', '', value => {
-        const parts = value.trim().split('/').filter(Boolean); let target = cloudRoot(connection);
-        for (const part of parts) target = cloudChild(connection, target, part, true);
-        return cloudMove(connection, item, cloudChild(connection, target, item.name, item.folder), win, copy);
-      })));
+      for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => {
+        new FolderPicker(this.plugin, (copy ? '复制 ' : '移动 ') + item.name, { id: cloudRoot(connection), name: connection.name || '云盘' }, (folder, page) => listCloud(connection, folder, page, win), async folder => {
+          await cloudMove(connection, item, cloudChild(connection, folder, item.name, item.folder), win, copy);
+          cloudCache(this.plugin).clear(); if (!this.closed && !this.busy) await this.load(false); new Notice('操作完成');
+        }, folder => !item.folder || !(folder === item.id || folder.startsWith(item.id.endsWith('/') ? item.id : item.id + '/'))).open();
+      }));
     }
     menu.addItem(i => i.setTitle('删除').setIcon('trash').onClick(() => this.operationDialog('删除 ' + item.name, item.folder ? '永久删除此文件夹。WebDAV 会同时删除所有子文件；S3 仅允许空文件夹。此操作不能从插件撤销。' : '永久删除此云端文件。此操作不能从插件撤销。', '', () => cloudDelete(connection, item, win), true)));
     return menu;
@@ -540,7 +541,6 @@ class CloudBrowser extends ItemView {
         else if (this.auto) { thumb._cloudLoad = () => paint(item, thumb); if (this.observer) this.observer.observe(thumb); else paint(item, thumb); }
       }
       tile.createDiv({ cls: 'ml-name', text: item.name });
-      const actions = tile.createEl('button', { text: '管理', cls: 'ml-cloud-full', attr: { 'aria-label': '管理 ' + item.name } }); actions.onclick = e => this.itemActions(item, connection).showAtMouseEvent(e);
     }
     if (items.length > 100) this.grid.createEl('p', { text: '为控制预览内存，仅展示前 100 项；请搜索名称缩小范围。' });
   }

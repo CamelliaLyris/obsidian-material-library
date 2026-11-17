@@ -33,3 +33,7 @@
 .ml-picker input[type=search] { width: 100%; margin-bottom: 12px; }
 .ml-reference img { display: block; max-width: 100%; height: auto; }
 .ml-reference-retry { font-size: 11px; opacity: .65; }
+.ml-folder-path { overflow-wrap: anywhere; color: var(--text-muted); }
+.ml-folder-list { display: flex; flex-direction: column; gap: 6px; max-height: 45vh; min-height: 100px; overflow-y: auto; margin: 12px 0; }
+.ml-folder-list button { width: 100%; justify-content: flex-start; text-align: left; flex-shrink: 0; }
+.ml-folder-picker > button { margin-right: 8px; margin-bottom: 8px; }

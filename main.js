@@ -91,6 +91,78 @@ async function renderCloudReference(plugin, source, el, ctx) {
   } catch (err) { status.setText('云端图片：' + err.message); }
 }
 
+class FolderPicker extends Modal {
+  constructor(plugin, title, root, list, submit, allowed = () => true) {
+    super(plugin.app); Object.assign(this, { plugin, heading: title, stack: [root], list, submit, allowed, serial: 0, closed: false });
+  }
+  onOpen() {
+    this.plugin.modals.add(this); this.contentEl.addClass('ml-folder-picker');
+    this.contentEl.createEl('h2', { text: this.heading });
+    this.pathEl = this.contentEl.createEl('p', { cls: 'ml-folder-path' });
+    this.up = this.contentEl.createEl('button', { text: '返回上层' }); this.up.onclick = () => { if (this.working || this.stack.length < 2) return; this.stack.pop(); this.draw(); };
+    this.entries = this.contentEl.createDiv({ cls: 'ml-folder-list' });
+    this.status = this.contentEl.createEl('p', { attr: { 'aria-live': 'polite' } });
+    this.more = this.contentEl.createEl('button', { text: '加载更多文件夹' }); this.more.onclick = () => this.draw(true);
+    this.confirm = this.contentEl.createEl('button', { text: '选择当前文件夹', cls: 'mod-cta' });
+    this.confirm.onclick = async () => {
+      if (this.confirm.disabled) return;
+      this.working = true; this.confirm.disabled = true; this.up.disabled = true; this.more.disabled = true; this.serial++;
+      try { await this.submit(this.stack.at(-1).id); this.close(); }
+      catch (err) { this.status.setText(err.message); }
+      finally { this.working = false; if (!this.closed) { this.confirm.disabled = !this.allowed(this.stack.at(-1).id); this.up.disabled = this.stack.length < 2; this.more.disabled = false; } }
+    };
+    this.draw();
+  }
+  async draw(append = false) {
+    const serial = ++this.serial, current = this.stack.at(-1);
+    this.pathEl.setText(this.stack.map(s => s.name).join(' / '));
+    this.up.disabled = this.stack.length < 2; this.confirm.disabled = true; this.more.disabled = true;
+    this.status.setText('正在读取文件夹…');
+    if (!append) { this.entries.empty(); this.page = null; this.more.style.display = 'none'; }
+    try {
+      const result = await this.list(current.id, append ? this.page : null);
+      if (this.closed || serial !== this.serial) return;
+      for (const item of result.items.filter(i => i.folder).sort((a,b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))) {
+        const button = this.entries.createEl('button', { text: '📁 ' + item.name, attr: { title: item.id } });
+        button.disabled = !this.allowed(item.id);
+        button.onclick = () => { if (this.working) return; this.stack.push(item); this.draw(); };
+      }
+      this.page = result.next; this.more.style.display = this.page ? '' : 'none'; this.more.disabled = false;
+      this.confirm.disabled = !this.allowed(current.id);
+      this.status.setText(this.entries.childElementCount ? '点击文件夹进入，或选择当前文件夹。' : '当前目录没有子文件夹，可直接选择当前文件夹。');
+    } catch (err) { if (!this.closed && serial === this.serial) { this.status.setText('读取失败：' + err.message); this.more.style.display = ''; this.more.setText('重试'); this.more.disabled = false; } }
+  }
+  onClose() { this.closed = true; this.serial++; this.plugin.modals.delete(this); }
+}
+function localFileDialog(view, file, remove = false) {
+  const modal = new Modal(view.app); view.plugin.modals.add(modal);
+  modal.onOpen = () => {
+    modal.contentEl.createEl('h2', { text: (remove ? '删除 ' : '重命名 ') + file.name });
+    modal.contentEl.createEl('p', { text: remove ? '按 Obsidian 的删除设置处理：移入回收站或永久删除。引用此文件的笔记可能无法显示它。' : '请输入完整文件名（保留扩展名）。' });
+    const input = remove ? null : modal.contentEl.createEl('input', { type: 'text', value: file.name, attr: { 'aria-label': '新文件名' } });
+    const status = modal.contentEl.createEl('p');
+    const button = modal.contentEl.createEl('button', { text: remove ? '确认删除' : '重命名', cls: remove ? 'mod-warning' : 'mod-cta' });
+    button.onclick = async () => {
+      if (button.disabled) return; button.disabled = true;
+      try {
+        if (remove) { if (await view.app.fileManager.trashFile(file) === false) throw new Error('文件未能移入回收站，请检查系统权限'); }
+        else await localTransfer(view.plugin, file, file.parent?.path || '', input.value, false);
+        view.refresh(); modal.close();
+      } catch (err) { status.setText(err.message); }
+      finally { button.disabled = false; }
+    };
+  };
+  modal.onClose = () => view.plugin.modals.delete(modal); modal.open();
+}
+async function localTransfer(plugin, file, folder, name, copy) {
+  name = cloudName(name);
+  if (/[:*?"<>|]/.test(name) || name.startsWith('.') || /[. ]$/.test(name)) throw new Error('文件名包含不支持的字符');
+  const target = normalizePath((folder ? folder + '/' : '') + name);
+  if (target === file.path) throw new Error('目标与原文件相同');
+  if (plugin.app.vault.getAbstractFileByPath(target) || await plugin.app.vault.adapter.exists(target)) throw new Error('目标已存在同名文件，请更换名称或目录');
+  if (copy) return plugin.app.vault.copy(file, target);
+  return plugin.app.fileManager.renameFile(file, target);
+}
 class LibraryView extends ItemView {
   constructor(leaf, plugin) { super(leaf); this.plugin = plugin; this.selected = new Set(); this.scope = ''; this.query = ''; this.type = ''; this.limit = 100; }
   getViewType() { return VIEW; }
@@ -178,6 +250,12 @@ class LibraryView extends ItemView {
         menu.addItem(i => i.setTitle('复制嵌入链接').setIcon('copy').onClick(() => this.copy('!' + this.app.fileManager.generateMarkdownLink(file, this.plugin.lastNote?.file?.path || ''))));
         menu.addItem(i => i.setTitle('复制路径').setIcon('copy').onClick(() => this.copy(file.path)));
         menu.addItem(i => i.setTitle('在 Obsidian 中打开').setIcon('external-link').onClick(() => this.app.workspace.getLeaf('tab').openFile(file)));
+        menu.addSeparator();
+        menu.addItem(i => i.setTitle('重命名').setIcon('pencil').onClick(() => localFileDialog(this, file)));
+        for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => {
+          new FolderPicker(this.plugin, (copy ? '复制 ' : '移动 ') + file.name, { id: '', name: '笔记库' }, async folder => ({ items: this.app.vault.getAllLoadedFiles().filter(f => Array.isArray(f.children) && f.path !== '/' && (f.parent?.path === folder || (!folder && f.parent?.path === '/'))).map(f => ({ id: f.path, name: f.name, folder: true })), next: null }), async folder => { await localTransfer(this.plugin, file, folder, file.name, copy); this.selected.delete(file.path); this.refresh(); new Notice(copy ? '文件已复制' : '文件已移动'); }).open();
+        }));
+        menu.addItem(i => i.setTitle('删除').setIcon('trash').onClick(() => localFileDialog(this, file, true)));
         menu.showAtMouseEvent(e);
       };
     }
@@ -699,11 +777,12 @@ class CloudBrowser extends ItemView {
     const supported = connection.provider === 'webdav' || !item.folder;
     if (supported) {
       menu.addItem(i => i.setTitle('重命名').setIcon('pencil').onClick(() => this.operationDialog('重命名 ' + item.name, '新名称（保留文件扩展名）', item.name, value => cloudMove(connection, item, cloudChild(connection, folder, value, item.folder), win))));
-      for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => this.operationDialog(copy ? '复制文件' : '移动文件', '目标文件夹（相对于此连接根目录，不含文件名；留空为根目录）', '', value => {
-        const parts = value.trim().split('/').filter(Boolean); let target = cloudRoot(connection);
-        for (const part of parts) target = cloudChild(connection, target, part, true);
-        return cloudMove(connection, item, cloudChild(connection, target, item.name, item.folder), win, copy);
-      })));
+      for (const copy of [false, true]) menu.addItem(i => i.setTitle(copy ? '复制到…' : '移动到…').setIcon(copy ? 'copy' : 'folder-input').onClick(() => {
+        new FolderPicker(this.plugin, (copy ? '复制 ' : '移动 ') + item.name, { id: cloudRoot(connection), name: connection.name || '云盘' }, (folder, page) => listCloud(connection, folder, page, win), async folder => {
+          await cloudMove(connection, item, cloudChild(connection, folder, item.name, item.folder), win, copy);
+          cloudCache(this.plugin).clear(); if (!this.closed && !this.busy) await this.load(false); new Notice('操作完成');
+        }, folder => !item.folder || !(folder === item.id || folder.startsWith(item.id.endsWith('/') ? item.id : item.id + '/'))).open();
+      }));
     }
     menu.addItem(i => i.setTitle('删除').setIcon('trash').onClick(() => this.operationDialog('删除 ' + item.name, item.folder ? '永久删除此文件夹。WebDAV 会同时删除所有子文件；S3 仅允许空文件夹。此操作不能从插件撤销。' : '永久删除此云端文件。此操作不能从插件撤销。', '', () => cloudDelete(connection, item, win), true)));
     return menu;
@@ -790,7 +869,6 @@ class CloudBrowser extends ItemView {
         else if (this.auto) { thumb._cloudLoad = () => paint(item, thumb); if (this.observer) this.observer.observe(thumb); else paint(item, thumb); }
       }
       tile.createDiv({ cls: 'ml-name', text: item.name });
-      const actions = tile.createEl('button', { text: '管理', cls: 'ml-cloud-full', attr: { 'aria-label': '管理 ' + item.name } }); actions.onclick = e => this.itemActions(item, connection).showAtMouseEvent(e);
     }
     if (items.length > 100) this.grid.createEl('p', { text: '为控制预览内存，仅展示前 100 项；请搜索名称缩小范围。' });
   }
