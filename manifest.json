@@ -1,7 +1,7 @@
 {
   "id": "material-library",
   "name": "素材库",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "minAppVersion": "1.4.0",
   "description": "本地与云端素材面板：分类、导入、预览，支持多个 WebDAV 和 S3 连接。",
   "author": "Afool",

@@ -37,3 +37,7 @@
 .ml-folder-list { display: flex; flex-direction: column; gap: 6px; max-height: 45vh; min-height: 100px; overflow-y: auto; margin: 12px 0; }
 .ml-folder-list button { width: 100%; justify-content: flex-start; text-align: left; flex-shrink: 0; }
 .ml-folder-picker > button { margin-right: 8px; margin-bottom: 8px; }
+.ml-selection-modal { width: 92vw; max-width: 1400px; }
+.ml-selection-modal .modal-content { height: 82vh; display: flex; flex-direction: column; }
+.ml-selection-host { flex: 1; min-height: 0; overflow: auto; }
+.ml-selection-host > .ml-view { height: auto; min-height: 100%; }

@@ -163,6 +163,32 @@ async function localTransfer(plugin, file, folder, name, copy) {
   if (copy) return plugin.app.vault.copy(file, target);
   return plugin.app.fileManager.renameFile(file, target);
 }
+class MaterialSelectionModal extends Modal {
+  constructor(plugin, resolve) { super(plugin.app); this.plugin = plugin; this.resolve = resolve; this.views = new Map(); this.closed = false; }
+  onOpen() {
+    this.plugin.modals.add(this); this.modalEl.addClass('ml-selection-modal');
+    this.contentEl.createEl('p', { text: '选择项目图片：可上传、管理本地文件，或切换云端。云端原图先下载到本地，选择后返回条目。' });
+    this.host = this.contentEl.createDiv({ cls: 'ml-selection-host' }); this.navigate('local').catch(err => { new Notice('无法打开图片选择器：' + err.message); this.close(); });
+  }
+  async navigate(type) {
+    if (this.closed) return;
+    if (this.current) this.current.contentEl.style.display = 'none';
+    let view = this.views.get(type);
+    if (!view) {
+      const leaf = this.app.workspace.activeLeaf || this.app.workspace.getMostRecentLeaf();
+      view = type === 'cloud' ? new CloudBrowser(leaf, this.plugin) : new LibraryView(leaf, this.plugin);
+      view.selectionSession = this; this.views.set(type, view);
+      this.host.appendChild(view.contentEl); await view.onOpen();
+    }
+    this.current = view; view.contentEl.style.display = ''; view.refresh?.();
+  }
+  choose(file) {
+    if (this.closed) return false;
+    if (!file || kind(file) !== 'image' || !this.app.vault.getAbstractFileByPath(file.path)) { new Notice('请选择一张仍存在的本地图片'); return false; }
+    this.result = file.path; this.close(); return true;
+  }
+  onClose() { this.closed = true; for (const view of this.views.values()) { view.onClose?.(); view.containerEl?.remove(); } this.views.clear(); this.plugin.modals.delete(this); this.resolve(this.result || null); }
+}
 class LibraryView extends ItemView {
   constructor(leaf, plugin) { super(leaf); this.plugin = plugin; this.selected = new Set(); this.scope = ''; this.query = ''; this.type = ''; this.limit = 100; }
   getViewType() { return VIEW; }
@@ -172,7 +198,7 @@ class LibraryView extends ItemView {
     this.contentEl.empty(); this.contentEl.addClass('ml-view');
     const header = this.contentEl.createDiv({ cls: 'ml-heading' });
     header.createEl('h2', { text: '素材库' });
-    this.button(header, '云端素材', () => this.plugin.openCloud());
+    this.button(header, '云端素材', () => this.selectionSession ? this.selectionSession.navigate('cloud') : this.plugin.openCloud());
     this.button(header, '设置', () => this.plugin.openSettings());
     this.contentEl.createDiv({ cls: 'ml-subtitle', text: '收藏素材，让每次创作都能直接开始。' });
     const tools = this.contentEl.createDiv({ cls: 'ml-tools' });
@@ -194,7 +220,7 @@ class LibraryView extends ItemView {
       const folder = folderPath(this.plugin.options.root + '/' + folderPath(name));
       await this.plugin.ensureFolder(folder); this.scope = folder; this.refresh();
     }).open());
-    this.insertButton = this.button(actions, '插入所选', () => this.insertSelected());
+    this.insertButton = this.button(actions, this.selectionSession ? '选择此图片' : '插入所选', () => this.insertSelected());
     this.button(actions, '清空选择', () => { this.selected.clear(); this.refreshGrid(); });
     this.status = this.contentEl.createDiv({ cls: 'ml-status', attr: { 'aria-live': 'polite' } });
     this.grid = this.contentEl.createDiv({ cls: 'ml-grid' });
@@ -246,7 +272,7 @@ class LibraryView extends ItemView {
       tile.oncontextmenu = e => {
         e.preventDefault(); const menu = new Menu();
         menu.addItem(i => i.setTitle('预览').setIcon('maximize').onClick(() => this.preview(file)));
-        menu.addItem(i => i.setTitle('插入到笔记').setIcon('file-plus').onClick(() => this.plugin.insert([file])));
+        menu.addItem(i => i.setTitle(this.selectionSession ? '选择此图片' : '插入到笔记').setIcon('file-plus').onClick(() => this.selectionSession ? this.selectionSession.choose(file) : this.plugin.insert([file])));
         menu.addItem(i => i.setTitle('复制嵌入链接').setIcon('copy').onClick(() => this.copy('!' + this.app.fileManager.generateMarkdownLink(file, this.plugin.lastNote?.file?.path || ''))));
         menu.addItem(i => i.setTitle('复制路径').setIcon('copy').onClick(() => this.copy(file.path)));
         menu.addItem(i => i.setTitle('在 Obsidian 中打开').setIcon('external-link').onClick(() => this.app.workspace.getLeaf('tab').openFile(file)));
@@ -289,7 +315,11 @@ class LibraryView extends ItemView {
     catch (err) { new Notice('导入失败：' + err.message); this.refresh(); }
     finally { this.importButton.disabled = false; this.importButton.setText('上传文件'); }
   }
-  insertSelected() { this.plugin.insert([...this.selected].map(p => this.app.vault.getAbstractFileByPath(p)).filter(Boolean)); }
+  insertSelected() {
+    const files = [...this.selected].map(p => this.app.vault.getAbstractFileByPath(p)).filter(Boolean);
+    if (this.selectionSession) { if (files.length !== 1) { new Notice('请只选择一张项目图片'); return; } return this.selectionSession.choose(files[0]); }
+    this.plugin.insert(files);
+  }
   preview(file) {
     if (['document', 'file'].includes(kind(file))) { this.app.workspace.getLeaf('tab').openFile(file); return; }
     const modal = new Modal(this.app); this.plugin.modals.add(modal);
@@ -297,7 +327,7 @@ class LibraryView extends ItemView {
       modal.modalEl.addClass('ml-preview'); modal.contentEl.createEl('h3', { text: file.name });
       const type = kind(file); const media = modal.contentEl.createEl(type === 'image' ? 'img' : type, { attr: { src: this.app.vault.getResourcePath(file), alt: file.basename, controls: '' } });
       modal.onClose = () => { if (type !== 'image') { media.pause(); media.removeAttribute('src'); media.load(); } this.plugin.modals.delete(modal); };
-      this.button(modal.contentEl, '插入到笔记', () => this.plugin.insert([file]), true);
+      this.button(modal.contentEl, this.selectionSession ? '选择此图片' : '插入到笔记', () => { if (this.selectionSession) { if (this.selectionSession.choose(file)) modal.close(); } else this.plugin.insert([file]); }, true);
     }; modal.open();
   }
 }
@@ -715,7 +745,7 @@ class CloudBrowser extends ItemView {
     this.plugin.cloudViews ||= new Set(); this.plugin.cloudViews.add(this);
     const heading = this.contentEl.createDiv({ cls: 'ml-heading' });
     heading.createEl('h2', { text: '云端素材' });
-    const local = heading.createEl('button', { text: '本地素材' }); local.onclick = () => this.plugin.openLibrary();
+    const local = heading.createEl('button', { text: '本地素材' }); local.onclick = () => this.selectionSession ? this.selectionSession.navigate('local') : this.plugin.openLibrary();
     const tools = this.contentEl.createDiv({ cls: 'ml-tools' });
     this.select = tools.createEl('select', { attr: { 'aria-label': '网盘连接' } });
     const add = tools.createEl('button', { text: '管理连接' }); add.onclick = () => thisCloudSettings(this.plugin);
@@ -864,7 +894,7 @@ class CloudBrowser extends ItemView {
       else {
         thumb.setText(this.auto ? '等待加载…' : '点击预览'); thumb.onclick = () => paint(item, thumb);
         const full = tile.createEl('button', { text: '查看大图', cls: 'ml-cloud-full' }); full.onclick = () => this.fullPreview(item);
-        const insert = tile.createEl('button', { text: '下载到本地并插入', cls: 'ml-cloud-full' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.plugin.insertCloud(connection, item); } finally { insert.disabled = false; } };
+        const insert = tile.createEl('button', { text: this.selectionSession ? '下载并选择此图片' : '下载到本地并插入', cls: 'ml-cloud-full' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.chooseCloudImage(connection, item); } finally { insert.disabled = false; } };
         if (cloudCache(this.plugin).peek(thumbnailKey(this.plugin, connection, item))) paint(item, thumb);
         else if (this.auto) { thumb._cloudLoad = () => paint(item, thumb); if (this.observer) this.observer.observe(thumb); else paint(item, thumb); }
       }
@@ -873,6 +903,13 @@ class CloudBrowser extends ItemView {
     if (items.length > 100) this.grid.createEl('p', { text: '为控制预览内存，仅展示前 100 项；请搜索名称缩小范围。' });
   }
   pump() { if (this.closed || this.plugin.originalRequests > 0) return; while (this.active < (this.plugin.options.previewConcurrency || 4) && this.queue.length) { const task = this.queue.shift(); this.active++; task().finally(() => { this.active--; this.pump(); }); } }
+  async chooseCloudImage(connection, item) {
+    if (!this.selectionSession) return this.plugin.insertCloud(connection, item);
+    try {
+      const file = await this.plugin.downloadCloudFile(connection, item, this.contentEl.ownerDocument.defaultView);
+      return this.selectionSession.choose(file);
+    } catch (err) { new Notice('下载或选择失败：' + err.message); return false; }
+  }
   async fullPreview(item) {
     const modal = new Modal(this.app), c = { ...this.connection }, win = this.contentEl.ownerDocument.defaultView; let closed = false; const urls = new Set();
     this.plugin.modals.add(modal);
@@ -880,7 +917,7 @@ class CloudBrowser extends ItemView {
       const image = modal.contentEl.createEl('img', { attr: { alt: item.name } });
       const small = cloudCache(this.plugin).peek(thumbnailKey(this.plugin, c, item));
       if (small) { const url = win.URL.createObjectURL(small); urls.add(url); image.src = url; image.dataset.stage = 'thumbnail'; status.setText('先显示缩略图，正在优先加载原图…'); }
-      const insert = modal.contentEl.createEl('button', { text: '下载到本地并插入', cls: 'mod-cta' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.plugin.insertCloud(c, item); } finally { insert.disabled = false; } };
+      const insert = modal.contentEl.createEl('button', { text: this.selectionSession ? '下载并选择此图片' : '下载到本地并插入', cls: 'mod-cta' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { const chosen = await this.chooseCloudImage(c, item); if (chosen && this.selectionSession) modal.close(); } finally { insert.disabled = false; } };
       try {
         const blob = await withOriginalPriority(this.plugin, () => cachedCloudImage(this.plugin, c, item, win, false));
         if (closed) return;
@@ -937,6 +974,7 @@ module.exports = class MaterialLibraryPlugin extends Plugin {
   }
   onunload() { this.app.workspace.detachLeavesOfType(VIEW); this.app.workspace.detachLeavesOfType(CLOUD_VIEW); }
   roots() { return [...new Set([this.options.root, ...this.options.sources])]; }
+  selectImage() { return new Promise(resolve => new MaterialSelectionModal(this, resolve).open()); }
   async openCloud() {
     try {
       let leaf = this.app.workspace.getLeavesOfType(CLOUD_VIEW)[0];

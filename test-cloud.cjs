@@ -131,7 +131,15 @@ let collision=false;try{await localTransfer(localPlugin,transferFile,'dest','exi
 check(!mainHasManagementButton(),'Cloud cards have no management button');
 let trashCalls=0;const deleteView={app:{fileManager:{trashFile:async()=>{trashCalls++;return true;}}},plugin,refresh(){}};localFileDialog(deleteView,transferFile,true);const localDelete=lastModal;check(trashCalls===0,'Local deletion waits for confirmation');localDelete.contentEl.querySelector('button').click();await waitFor(()=>trashCalls===1);
 function mainHasManagementButton(){const v=cloudView(plugin);v.open();v.connection={...dav};v.stack=[{id:dav.endpoint,name:'root'}];v.items=[{id:dav.endpoint+'folder/',name:'folder',folder:true}];v.draw();const found=[...v.grid.querySelectorAll('button')].some(b=>b.textContent==='管理');check(typeof v.grid.firstElementChild.oncontextmenu==='function','Cloud right-click menu retained');v.close();return found;}
-document.getElementById('result').textContent='PASS: folder picker navigation/paging/selection, local copy/rename/conflicts, cloud right-click without management button, drag/drop and deletion confirmation; local-first and preview regression';
+plugin.app.workspace.activeLeaf={app:plugin.app};plugin.app.vault.getAllLoadedFiles=()=>[...localFiles.values()];
+const beforeSelection=insertion;const pickedPromise=plugin.selectImage();const selectionModal=lastModal;await waitFor(()=>selectionModal.current);
+check(selectionModal.current instanceof LibraryView&&selectionModal.current.selectionSession===selectionModal,'External image API reuses full local material view');
+check([...selectionModal.current.contentEl.querySelectorAll('button')].some(b=>b.textContent==='上传文件'),'Full picker retains upload action');
+await selectionModal.navigate('cloud');check(selectionModal.current instanceof CloudBrowser,'Full picker reuses cloud management view');
+const pickerCloud=selectionModal.current;await pickerCloud.chooseCloudImage(refConnection,serverItem);check(await pickedPromise===downloaded,'Cloud selection returns local original path');check(insertion===beforeSelection,'External selection does not write into note');
+const cancelPromise=plugin.selectImage();const canceled=lastModal;await waitFor(()=>canceled.current);canceled.close();check(await cancelPromise===null,'Cancel returns no selection');
+const localPromise=plugin.selectImage();const localModal=lastModal;await waitFor(()=>localModal.current);localModal.current.selected.add(localFile.path);localModal.current.insertSelected();check(await localPromise===localFile.path,'Local selection returns original file path');
+document.getElementById('result').textContent='PASS: full material local/cloud selection API, cloud download before return, cancel and no note writes; folder management, preview and insertion regression';
 }
 test().catch(e=>document.getElementById('result').textContent='FAIL: '+e.stack);
 `;

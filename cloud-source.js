@@ -387,7 +387,7 @@ class CloudBrowser extends ItemView {
     this.plugin.cloudViews ||= new Set(); this.plugin.cloudViews.add(this);
     const heading = this.contentEl.createDiv({ cls: 'ml-heading' });
     heading.createEl('h2', { text: '云端素材' });
-    const local = heading.createEl('button', { text: '本地素材' }); local.onclick = () => this.plugin.openLibrary();
+    const local = heading.createEl('button', { text: '本地素材' }); local.onclick = () => this.selectionSession ? this.selectionSession.navigate('local') : this.plugin.openLibrary();
     const tools = this.contentEl.createDiv({ cls: 'ml-tools' });
     this.select = tools.createEl('select', { attr: { 'aria-label': '网盘连接' } });
     const add = tools.createEl('button', { text: '管理连接' }); add.onclick = () => thisCloudSettings(this.plugin);
@@ -536,7 +536,7 @@ class CloudBrowser extends ItemView {
       else {
         thumb.setText(this.auto ? '等待加载…' : '点击预览'); thumb.onclick = () => paint(item, thumb);
         const full = tile.createEl('button', { text: '查看大图', cls: 'ml-cloud-full' }); full.onclick = () => this.fullPreview(item);
-        const insert = tile.createEl('button', { text: '下载到本地并插入', cls: 'ml-cloud-full' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.plugin.insertCloud(connection, item); } finally { insert.disabled = false; } };
+        const insert = tile.createEl('button', { text: this.selectionSession ? '下载并选择此图片' : '下载到本地并插入', cls: 'ml-cloud-full' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.chooseCloudImage(connection, item); } finally { insert.disabled = false; } };
         if (cloudCache(this.plugin).peek(thumbnailKey(this.plugin, connection, item))) paint(item, thumb);
         else if (this.auto) { thumb._cloudLoad = () => paint(item, thumb); if (this.observer) this.observer.observe(thumb); else paint(item, thumb); }
       }
@@ -545,6 +545,13 @@ class CloudBrowser extends ItemView {
     if (items.length > 100) this.grid.createEl('p', { text: '为控制预览内存，仅展示前 100 项；请搜索名称缩小范围。' });
   }
   pump() { if (this.closed || this.plugin.originalRequests > 0) return; while (this.active < (this.plugin.options.previewConcurrency || 4) && this.queue.length) { const task = this.queue.shift(); this.active++; task().finally(() => { this.active--; this.pump(); }); } }
+  async chooseCloudImage(connection, item) {
+    if (!this.selectionSession) return this.plugin.insertCloud(connection, item);
+    try {
+      const file = await this.plugin.downloadCloudFile(connection, item, this.contentEl.ownerDocument.defaultView);
+      return this.selectionSession.choose(file);
+    } catch (err) { new Notice('下载或选择失败：' + err.message); return false; }
+  }
   async fullPreview(item) {
     const modal = new Modal(this.app), c = { ...this.connection }, win = this.contentEl.ownerDocument.defaultView; let closed = false; const urls = new Set();
     this.plugin.modals.add(modal);
@@ -552,7 +559,7 @@ class CloudBrowser extends ItemView {
       const image = modal.contentEl.createEl('img', { attr: { alt: item.name } });
       const small = cloudCache(this.plugin).peek(thumbnailKey(this.plugin, c, item));
       if (small) { const url = win.URL.createObjectURL(small); urls.add(url); image.src = url; image.dataset.stage = 'thumbnail'; status.setText('先显示缩略图，正在优先加载原图…'); }
-      const insert = modal.contentEl.createEl('button', { text: '下载到本地并插入', cls: 'mod-cta' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { await this.plugin.insertCloud(c, item); } finally { insert.disabled = false; } };
+      const insert = modal.contentEl.createEl('button', { text: this.selectionSession ? '下载并选择此图片' : '下载到本地并插入', cls: 'mod-cta' }); insert.onclick = async () => { if (insert.disabled) return; insert.disabled = true; try { const chosen = await this.chooseCloudImage(c, item); if (chosen && this.selectionSession) modal.close(); } finally { insert.disabled = false; } };
       try {
         const blob = await withOriginalPriority(this.plugin, () => cachedCloudImage(this.plugin, c, item, win, false));
         if (closed) return;
